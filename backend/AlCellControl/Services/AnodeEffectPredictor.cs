@@ -1,9 +1,27 @@
+using System.Collections.Concurrent;
+
 namespace AlCellControl.Services;
 
 public class AnodeEffectPredictor
 {
     private const double NominalTemperature = 960.0;
     private const double HighVoltageThreshold = 4.5;
+    private const int DriftCheckWindow = 200;
+    private const double DriftThreshold = 0.15;
+    private const int RetrainMinSamples = 100;
+
+    private readonly ConcurrentDictionary<int, PredictionRecord> _predictionHistory = new();
+    private readonly ConcurrentQueue<TrainingSample> _trainingBuffer = new();
+    private int _totalPredictions = 0;
+    private int _correctPredictions = 0;
+    private DateTime _lastRetrainTime = DateTime.UtcNow;
+    private readonly object _retrainLock = new();
+    private volatile TreeWeights _weights = new();
+
+    public AnodeEffectPredictor()
+    {
+        _weights = new TreeWeights(1.0, 1.0, 1.0, 1.0, 1.0);
+    }
 
     public double Predict(double[] recentVoltages, double recentTemperature)
     {
@@ -15,8 +33,118 @@ public class AnodeEffectPredictor
         double p4 = Tree4(features);
         double p5 = Tree5(features);
 
-        double avg = (p1 + p2 + p3 + p4 + p5) / 5.0;
+        var w = _weights;
+        double weightedSum = w.W1 * p1 + w.W2 * p2 + w.W3 * p3 + w.W4 * p4 + w.W5 * p5;
+        double avg = weightedSum / (w.W1 + w.W2 + w.W3 + w.W4 + w.W5);
         return Math.Clamp(avg, 0.0, 1.0);
+    }
+
+    public void RecordPrediction(int cellId, double predictedProbability)
+    {
+        _predictionHistory.AddOrUpdate(cellId,
+            _ => new PredictionRecord(predictedProbability, DateTime.UtcNow),
+            (_, existing) =>
+            {
+                existing.Predictions.Enqueue((predictedProbability, DateTime.UtcNow));
+                while (existing.Predictions.Count > DriftCheckWindow)
+                    existing.Predictions.TryDequeue(out _);
+                return existing;
+            });
+
+        Interlocked.Increment(ref _totalPredictions);
+
+        bool isHighRisk = predictedProbability > 0.8;
+        _trainingBuffer.Enqueue(new TrainingSample(cellId, predictedProbability, isHighRisk, DateTime.UtcNow));
+
+        CheckDriftAndRetrain();
+    }
+
+    public void RecordActualOutcome(int cellId, bool anodeEffectOccurred)
+    {
+        if (_predictionHistory.TryGetValue(cellId, out var record))
+        {
+            if (record.Predictions.TryPeek(out var latest))
+            {
+                bool predictedHigh = latest.Probability > 0.8;
+                if (predictedHigh == anodeEffectOccurred)
+                {
+                    Interlocked.Increment(ref _correctPredictions);
+                }
+            }
+        }
+    }
+
+    public ModelPerformanceMetrics GetPerformanceMetrics()
+    {
+        int total = Interlocked.CompareExchange(ref _totalPredictions, 0, 0);
+        int correct = Interlocked.CompareExchange(ref _correctPredictions, 0, 0);
+        double accuracy = total > 0 ? (double)correct / total : 0;
+
+        return new ModelPerformanceMetrics(
+            total,
+            correct,
+            accuracy,
+            _lastRetrainTime,
+            _trainingBuffer.Count,
+            _weights
+        );
+    }
+
+    private void CheckDriftAndRetrain()
+    {
+        int total = Interlocked.CompareExchange(ref _totalPredictions, 0, 0);
+        if (total < RetrainMinSamples) return;
+        if (total % 50 != 0) return;
+
+        int correct = Interlocked.CompareExchange(ref _correctPredictions, 0, 0);
+        double accuracy = (double)correct / total;
+
+        if (accuracy < (1.0 - DriftThreshold) || (DateTime.UtcNow - _lastRetrainTime).TotalHours > 24)
+        {
+            lock (_retrainLock)
+            {
+                if ((DateTime.UtcNow - _lastRetrainTime).TotalMinutes < 10) return;
+
+                RetrainWeights();
+                _lastRetrainTime = DateTime.UtcNow;
+                Interlocked.Exchange(ref _totalPredictions, 0);
+                Interlocked.Exchange(ref _correctPredictions, 0);
+            }
+        }
+    }
+
+    private void RetrainWeights()
+    {
+        var samples = new List<TrainingSample>();
+        while (_trainingBuffer.TryDequeue(out var sample))
+        {
+            samples.Add(sample);
+        }
+
+        if (samples.Count < RetrainMinSamples) return;
+
+        int highRiskCount = samples.Count(s => s.IsHighRisk);
+        int lowRiskCount = samples.Count - highRiskCount;
+
+        if (highRiskCount < 5 || lowRiskCount < 5) return;
+
+        double highRiskRatio = (double)highRiskCount / samples.Count;
+
+        double w1 = highRiskRatio < 0.1 ? 1.3 : 1.0;
+        double w2 = highRiskRatio > 0.3 ? 1.2 : 1.0;
+        double w3 = 1.0;
+        double w4 = lowRiskCount < highRiskCount * 2 ? 1.25 : 1.0;
+        double w5 = 1.0;
+
+        double recentHighRisk = samples.TakeLast(50).Count(s => s.IsHighRisk) / 50.0;
+        if (recentHighRisk > highRiskRatio * 1.5)
+        {
+            w1 *= 1.2;
+            w2 *= 1.2;
+            w5 *= 1.15;
+        }
+
+        _weights = new TreeWeights(w1, w2, w3, w4, w5);
     }
 
     private static double[] ExtractFeatures(double[] voltages, double temperature)
@@ -282,3 +410,26 @@ public class AnodeEffectPredictor
         return 0.04;
     }
 }
+
+public record TreeWeights(double W1, double W2, double W3, double W4, double W5);
+
+public record ModelPerformanceMetrics(
+    int TotalPredictions,
+    int CorrectPredictions,
+    double Accuracy,
+    DateTime LastRetrainTime,
+    int TrainingBufferSize,
+    TreeWeights CurrentWeights
+);
+
+public class PredictionRecord
+{
+    public ConcurrentQueue<(double Probability, DateTime Timestamp)> Predictions { get; } = new();
+
+    public PredictionRecord(double probability, DateTime timestamp)
+    {
+        Predictions.Enqueue((probability, timestamp));
+    }
+}
+
+public record TrainingSample(int CellId, double PredictedProbability, bool IsHighRisk, DateTime Timestamp);

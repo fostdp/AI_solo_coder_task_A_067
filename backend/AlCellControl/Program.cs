@@ -25,6 +25,7 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddSingleton<AluminaConcentrationEstimator>();
 builder.Services.AddSingleton<AnodeEffectPredictor>();
+builder.Services.AddSingleton<CellBufferService>();
 builder.Services.AddSingleton<MqttPublisherService>();
 
 builder.Services.AddHostedService<ConcentrationMonitorService>();
