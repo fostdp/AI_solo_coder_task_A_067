@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using AlCellControl.Data;
 using AlCellControl.Models;
 using AlCellControl.Services;
+using AlCellControl.Commands;
+using MediatR;
 
 namespace AlCellControl.Controllers;
 
@@ -11,127 +13,23 @@ namespace AlCellControl.Controllers;
 public class CellDataController : ControllerBase
 {
     private readonly IServiceProvider _serviceProvider;
-    private readonly AluminaConcentrationEstimator _concentrationEstimator;
-    private readonly AnodeEffectPredictor _anodeEffectPredictor;
+    private readonly ZigBeeReceiver _zigBeeReceiver;
     private readonly CellBufferService _cellBufferService;
 
     public CellDataController(
         IServiceProvider serviceProvider,
-        AluminaConcentrationEstimator concentrationEstimator,
-        AnodeEffectPredictor anodeEffectPredictor,
+        ZigBeeReceiver zigBeeReceiver,
         CellBufferService cellBufferService)
     {
         _serviceProvider = serviceProvider;
-        _concentrationEstimator = concentrationEstimator;
-        _anodeEffectPredictor = anodeEffectPredictor;
+        _zigBeeReceiver = zigBeeReceiver;
         _cellBufferService = cellBufferService;
     }
 
     [HttpPost("batch")]
     public async Task<IActionResult> Batch([FromBody] List<CellDataDto> data)
     {
-        using var scope = _serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-        foreach (var item in data)
-        {
-            var currentAvg = ParseCurrentDistribution(item.AnodeCurrentDistribution);
-
-            _cellBufferService.Write(item.CellId, item.Voltage, currentAvg);
-
-            var realtimeData = new CellRealtimeData
-            {
-                CellId = item.CellId,
-                Voltage = item.Voltage,
-                AnodeCurrentDistribution = item.AnodeCurrentDistribution,
-                CellTemperature = item.CellTemperature,
-                BathTemperature = item.BathTemperature,
-                AluminumLevel = item.AluminumLevel,
-                BathLevel = item.BathLevel,
-                ReceivedAt = DateTime.UtcNow
-            };
-
-            db.CellRealtimeData.Add(realtimeData);
-            await db.SaveChangesAsync();
-
-            var voltages = _cellBufferService.ReadVoltages(item.CellId, 20);
-            var currents = _cellBufferService.ReadCurrents(item.CellId, 20);
-
-            if (voltages.Length >= 2)
-            {
-                var concentration = _concentrationEstimator.Estimate(voltages, currents);
-
-                var concentrationHistory = new AluminaConcentrationHistory
-                {
-                    CellId = item.CellId,
-                    EstimatedConcentration = concentration,
-                    ModelVersion = "SVM-v2-FFT",
-                    EstimatedAt = DateTime.UtcNow
-                };
-                db.AluminaConcentrationHistory.Add(concentrationHistory);
-
-                realtimeData.AluminaConcentration = concentration;
-                db.CellRealtimeData.Update(realtimeData);
-
-                if (concentration < 1.8)
-                {
-                    var feedingRecord = new FeedingRecord
-                    {
-                        CellId = item.CellId,
-                        FeedType = "CrustBreak",
-                        FeedAmountKg = 1.8,
-                        FedAt = DateTime.UtcNow
-                    };
-                    db.FeedingRecords.Add(feedingRecord);
-
-                    var controlCommand = new CellControlCommand
-                    {
-                        CellId = item.CellId,
-                        CommandType = "AutoFeed",
-                        CommandParams = $"{{\"feedType\":\"CrustBreak\",\"feedAmountKg\":1.8}}",
-                        IssuedAt = DateTime.UtcNow,
-                        Status = "Pending"
-                    };
-                    db.CellControlCommands.Add(controlCommand);
-                }
-
-                await db.SaveChangesAsync();
-            }
-
-            var last60Voltages = _cellBufferService.ReadVoltages(item.CellId, 60);
-
-            if (last60Voltages.Length >= 2)
-            {
-                var probability = _anodeEffectPredictor.Predict(last60Voltages, item.CellTemperature);
-
-                var prediction = new AnodeEffectPrediction
-                {
-                    CellId = item.CellId,
-                    Probability = probability,
-                    PredictedAt = DateTime.UtcNow
-                };
-                db.AnodeEffectPredictions.Add(prediction);
-
-                _anodeEffectPredictor.RecordPrediction(item.CellId, probability);
-
-                if (probability > 0.8)
-                {
-                    var alarm = new AlarmRecord
-                    {
-                        CellId = item.CellId,
-                        AlarmLevel = 2,
-                        AlarmType = "AnodeEffect",
-                        AlarmMessage = $"Anode effect probability {probability:P1} exceeds threshold",
-                        TriggeredAt = DateTime.UtcNow,
-                        IsAcknowledged = false
-                    };
-                    db.AlarmRecords.Add(alarm);
-                }
-
-                await db.SaveChangesAsync();
-            }
-        }
-
+        await _zigBeeReceiver.ReceiveBatchAsync(data);
         return Ok();
     }
 
@@ -202,7 +100,7 @@ public class CellDataController : ControllerBase
         var trendData = voltageData.Select(d => new
         {
             d.Voltage,
-            Current = ParseCurrentAverage(d.AnodeCurrentDistribution),
+            Current = ParseCurrentAvg(d.AnodeCurrentDistribution),
             d.ReceivedAt
         }).ToList();
 
@@ -226,7 +124,7 @@ public class CellDataController : ControllerBase
         return Ok(latest);
     }
 
-    private static double ParseCurrentDistribution(string distribution)
+    private static double ParseCurrentAvg(string distribution)
     {
         if (string.IsNullOrWhiteSpace(distribution))
             return 0;
@@ -249,22 +147,7 @@ public class CellDataController : ControllerBase
 
         return count > 0 ? sum / count : 0;
     }
-
-    private static double ParseCurrentAverage(string distribution)
-    {
-        return ParseCurrentDistribution(distribution);
-    }
 }
-
-public record CellDataDto(
-    int CellId,
-    double Voltage,
-    string AnodeCurrentDistribution,
-    double CellTemperature,
-    double BathTemperature,
-    double AluminumLevel,
-    double BathLevel
-);
 
 public record CellOverviewDto(
     int CellId,

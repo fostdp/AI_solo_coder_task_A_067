@@ -1,6 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using AlCellControl.Data;
 using AlCellControl.Services;
+using AlCellControl.Events;
+using AlCellControl.Commands;
+using MediatR;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,13 +26,14 @@ builder.Services.AddCors(options =>
     });
 });
 
-builder.Services.AddSingleton<AluminaConcentrationEstimator>();
-builder.Services.AddSingleton<AnodeEffectPredictor>();
-builder.Services.AddSingleton<CellBufferService>();
-builder.Services.AddSingleton<MqttPublisherService>();
+builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(Program).Assembly));
 
-builder.Services.AddHostedService<ConcentrationMonitorService>();
-builder.Services.AddHostedService<AnodeEffectMonitorService>();
+builder.Services.AddSingleton<CellBufferService>();
+builder.Services.AddSingleton<ZigBeeReceiver>();
+builder.Services.AddSingleton<ConcentrationEstimator>();
+builder.Services.AddSingleton<AnodeEffectPredictorService>();
+builder.Services.AddSingleton<AlarmOrchestrator>();
+builder.Services.AddSingleton<MqttPublisherService>();
 
 var app = builder.Build();
 

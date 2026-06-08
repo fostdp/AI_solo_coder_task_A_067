@@ -1,0 +1,14 @@
+{
+  "NominalTemperature": 960.0,
+  "HighVoltageThreshold": 4.5,
+  "AlarmThreshold": 0.80,
+  "FeatureNames": ["vMean", "vStd", "vMax", "noisePower", "vSlope", "tempDeviation", "spikeCount", "vRateOfChange"],
+  "VoltageSampleCount": 60,
+  "InitialWeights": { "W1": 1.0, "W2": 1.0, "W3": 1.0, "W4": 1.0, "W5": 1.0 },
+  "DriftCheckWindow": 200,
+  "DriftThreshold": 0.15,
+  "RetrainMinSamples": 100,
+  "RetrainCooldownMinutes": 10,
+  "RetrainIntervalHours": 24,
+  "ExtinguishAluminaAmount": 2.5
+}

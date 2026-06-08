@@ -1,31 +1,99 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
+using AlCellControl.Data;
+using AlCellControl.Events;
+using AlCellControl.Models;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
 
 namespace AlCellControl.Services;
 
-public class AnodeEffectPredictor
+public class AnodeEffectPredictorService : INotificationHandler<ConcentrationEstimatedEvent>
 {
-    private const double NominalTemperature = 960.0;
-    private const double HighVoltageThreshold = 4.5;
-    private const int DriftCheckWindow = 200;
-    private const double DriftThreshold = 0.15;
-    private const int RetrainMinSamples = 100;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly CellBufferService _cellBufferService;
+    private readonly IMediator _mediator;
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<AnodeEffectPredictorService> _logger;
 
+    private readonly RfModelConfig _modelConfig;
     private readonly ConcurrentDictionary<int, PredictionRecord> _predictionHistory = new();
     private readonly ConcurrentQueue<TrainingSample> _trainingBuffer = new();
     private int _totalPredictions = 0;
     private int _correctPredictions = 0;
     private DateTime _lastRetrainTime = DateTime.UtcNow;
     private readonly object _retrainLock = new();
-    private volatile TreeWeights _weights = new();
+    private volatile TreeWeights _weights;
 
-    public AnodeEffectPredictor()
+    public AnodeEffectPredictorService(
+        IServiceProvider serviceProvider,
+        CellBufferService cellBufferService,
+        IMediator mediator,
+        IConfiguration configuration,
+        ILogger<AnodeEffectPredictorService> logger)
     {
-        _weights = new TreeWeights(1.0, 1.0, 1.0, 1.0, 1.0);
+        _serviceProvider = serviceProvider;
+        _cellBufferService = cellBufferService;
+        _mediator = mediator;
+        _configuration = configuration;
+        _logger = logger;
+
+        var rfPath = _configuration["ModelConfig:RfPath"] ?? "Configuration/rf_model.json";
+        var fullPath = Path.Combine(AppContext.BaseDirectory, rfPath);
+        if (File.Exists(fullPath))
+        {
+            var json = File.ReadAllText(fullPath);
+            _modelConfig = JsonSerializer.Deserialize<RfModelConfig>(json) ?? new RfModelConfig();
+        }
+        else
+        {
+            _modelConfig = new RfModelConfig();
+        }
+
+        _weights = new TreeWeights(
+            _modelConfig.InitialWeights.W1,
+            _modelConfig.InitialWeights.W2,
+            _modelConfig.InitialWeights.W3,
+            _modelConfig.InitialWeights.W4,
+            _modelConfig.InitialWeights.W5
+        );
     }
 
-    public double Predict(double[] recentVoltages, double recentTemperature)
+    public async Task Handle(ConcentrationEstimatedEvent notification, CancellationToken cancellationToken)
     {
-        var features = ExtractFeatures(recentVoltages, recentTemperature);
+        var voltages = _cellBufferService.ReadVoltages(notification.CellId, _modelConfig.VoltageSampleCount);
+
+        if (voltages.Length < 2)
+            return;
+
+        var probability = Predict(voltages, notification.CellTemperature);
+
+        using var scope = _serviceProvider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        var prediction = new AnodeEffectPrediction
+        {
+            CellId = notification.CellId,
+            Probability = probability,
+            PredictedAt = DateTime.UtcNow
+        };
+
+        db.AnodeEffectPredictions.Add(prediction);
+        await db.SaveChangesAsync(cancellationToken);
+
+        RecordPrediction(notification.CellId, probability);
+
+        await _mediator.Publish(new AnodeEffectPredictedEvent
+        {
+            CellId = notification.CellId,
+            Probability = probability,
+            PredictedAt = prediction.PredictedAt
+        }, cancellationToken);
+    }
+
+    private double Predict(double[] voltages, double temperature)
+    {
+        var features = ExtractFeatures(voltages, temperature);
 
         double p1 = Tree1(features);
         double p2 = Tree2(features);
@@ -39,14 +107,14 @@ public class AnodeEffectPredictor
         return Math.Clamp(avg, 0.0, 1.0);
     }
 
-    public void RecordPrediction(int cellId, double predictedProbability)
+    private void RecordPrediction(int cellId, double predictedProbability)
     {
         _predictionHistory.AddOrUpdate(cellId,
             _ => new PredictionRecord(predictedProbability, DateTime.UtcNow),
             (_, existing) =>
             {
                 existing.Predictions.Enqueue((predictedProbability, DateTime.UtcNow));
-                while (existing.Predictions.Count > DriftCheckWindow)
+                while (existing.Predictions.Count > _modelConfig.DriftCheckWindow)
                     existing.Predictions.TryDequeue(out _);
                 return existing;
             });
@@ -93,17 +161,17 @@ public class AnodeEffectPredictor
     private void CheckDriftAndRetrain()
     {
         int total = Interlocked.CompareExchange(ref _totalPredictions, 0, 0);
-        if (total < RetrainMinSamples) return;
+        if (total < _modelConfig.RetrainMinSamples) return;
         if (total % 50 != 0) return;
 
         int correct = Interlocked.CompareExchange(ref _correctPredictions, 0, 0);
         double accuracy = (double)correct / total;
 
-        if (accuracy < (1.0 - DriftThreshold) || (DateTime.UtcNow - _lastRetrainTime).TotalHours > 24)
+        if (accuracy < (1.0 - _modelConfig.DriftThreshold) || (DateTime.UtcNow - _lastRetrainTime).TotalHours > _modelConfig.RetrainIntervalHours)
         {
             lock (_retrainLock)
             {
-                if ((DateTime.UtcNow - _lastRetrainTime).TotalMinutes < 10) return;
+                if ((DateTime.UtcNow - _lastRetrainTime).TotalMinutes < _modelConfig.RetrainCooldownMinutes) return;
 
                 RetrainWeights();
                 _lastRetrainTime = DateTime.UtcNow;
@@ -121,7 +189,7 @@ public class AnodeEffectPredictor
             samples.Add(sample);
         }
 
-        if (samples.Count < RetrainMinSamples) return;
+        if (samples.Count < _modelConfig.RetrainMinSamples) return;
 
         int highRiskCount = samples.Count(s => s.IsHighRisk);
         int lowRiskCount = samples.Count - highRiskCount;
@@ -147,7 +215,7 @@ public class AnodeEffectPredictor
         _weights = new TreeWeights(w1, w2, w3, w4, w5);
     }
 
-    private static double[] ExtractFeatures(double[] voltages, double temperature)
+    private double[] ExtractFeatures(double[] voltages, double temperature)
     {
         double vMean = voltages.Average();
 
@@ -181,12 +249,12 @@ public class AnodeEffectPredictor
         double denom = n * sumX2 - sumX * sumX;
         double vSlope = Math.Abs(denom) < 1e-12 ? 0.0 : (n * sumXY - sumX * sumY) / denom;
 
-        double tempDeviation = temperature - NominalTemperature;
+        double tempDeviation = temperature - _modelConfig.NominalTemperature;
 
         int spikeCount = 0;
         for (int i = 0; i < voltages.Length; i++)
         {
-            if (voltages[i] > HighVoltageThreshold) spikeCount++;
+            if (voltages[i] > _modelConfig.HighVoltageThreshold) spikeCount++;
         }
 
         double vRateOfChange = 0;
@@ -409,6 +477,31 @@ public class AnodeEffectPredictor
         if (vSlope > 0.001 && vMean > 4.15) return 0.22;
         return 0.04;
     }
+}
+
+public class RfModelConfig
+{
+    public double NominalTemperature { get; set; } = 960.0;
+    public double HighVoltageThreshold { get; set; } = 4.5;
+    public double AlarmThreshold { get; set; } = 0.8;
+    public string[] FeatureNames { get; set; } = new[] { "vMean", "vStd", "vMax", "noisePower", "vSlope", "tempDeviation", "spikeCount", "vRateOfChange" };
+    public int VoltageSampleCount { get; set; } = 60;
+    public TreeWeightsConfig InitialWeights { get; set; } = new();
+    public int DriftCheckWindow { get; set; } = 200;
+    public double DriftThreshold { get; set; } = 0.15;
+    public int RetrainMinSamples { get; set; } = 100;
+    public int RetrainCooldownMinutes { get; set; } = 10;
+    public int RetrainIntervalHours { get; set; } = 24;
+    public double ExtinguishAluminaAmount { get; set; } = 2.5;
+}
+
+public class TreeWeightsConfig
+{
+    public double W1 { get; set; } = 1.0;
+    public double W2 { get; set; } = 1.0;
+    public double W3 { get; set; } = 1.0;
+    public double W4 { get; set; } = 1.0;
+    public double W5 { get; set; } = 1.0;
 }
 
 public record TreeWeights(double W1, double W2, double W3, double W4, double W5);
