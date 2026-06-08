@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using MQTTnet;
 using MQTTnet.Protocol;
@@ -12,6 +13,31 @@ public class MqttService : IHostedService
     private readonly ILogger<MqttService> _logger;
     private readonly IConfiguration _config;
     private bool _isConnected;
+
+    private enum MqttPriority
+    {
+        Critical = 0,
+        High = 1,
+        Normal = 2,
+        Low = 3
+    }
+
+    private record MqttMessage(string Topic, string Payload, MqttPriority Priority, DateTime EnqueueTime);
+
+    private readonly PriorityQueue<MqttMessage, (int Priority, DateTime EnqueueTime)> _messageQueue = new();
+    private readonly object _queueLock = new();
+    private readonly SemaphoreSlim _queueSignal = new(0);
+    private CancellationTokenSource? _queueCts;
+    private Task? _queueProcessorTask;
+
+    private readonly ConcurrentDictionary<string, DateTime> _topicLastSendTime = new();
+    private static readonly TimeSpan CriticalMinInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan HighMinInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan NormalMinInterval = TimeSpan.FromMilliseconds(2000);
+    private static readonly TimeSpan LowMinInterval = TimeSpan.FromMilliseconds(5000);
+
+    private const int MaxQueueSize = 500;
+    private const int MaxDedupWindowMs = 3000;
 
     public MqttService(ILogger<MqttService> logger, IConfiguration config)
     {
@@ -59,6 +85,9 @@ public class MqttService : IHostedService
                 _logger.LogWarning("MQTT connection failed: {Message}. Will retry on publish.", ex.Message);
                 _isConnected = false;
             }
+
+            _queueCts = new CancellationTokenSource();
+            _queueProcessorTask = Task.Run(() => ProcessQueueAsync(_queueCts.Token));
         }
         catch (Exception ex)
         {
@@ -68,6 +97,13 @@ public class MqttService : IHostedService
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        _queueCts?.Cancel();
+
+        if (_queueProcessorTask != null)
+        {
+            try { await _queueProcessorTask; } catch { }
+        }
+
         if (_mqttClient?.IsConnected == true)
         {
             await _mqttClient.DisconnectAsync(cancellationToken: cancellationToken);
@@ -85,18 +121,114 @@ public class MqttService : IHostedService
             Timestamp = DateTime.UtcNow.ToString("O")
         };
 
-        await PublishAsync("alarm/concentration", payload);
-        await PublishAsync($"alarm/cell/{cellId}", payload);
-        await PublishAsync("screen/workshop", payload);
-        await PublishAsync("dispatch/system", payload);
+        var json = JsonConvert.SerializeObject(payload);
+
+        Enqueue($"alarm/cell/{cellId}", json, MqttPriority.Critical);
+        Enqueue("alarm/concentration", json, MqttPriority.High);
+        Enqueue("screen/workshop", json, MqttPriority.High);
+        Enqueue("dispatch/system", json, MqttPriority.Normal);
+
+        await Task.CompletedTask;
     }
 
     public async Task PublishCellStatusAsync(int cellId, object status)
     {
-        await PublishAsync($"cell/{cellId}/status", status);
+        var json = JsonConvert.SerializeObject(status);
+        Enqueue($"cell/{cellId}/status", json, MqttPriority.Low);
+        await Task.CompletedTask;
     }
 
-    private async Task PublishAsync(string topic, object payload)
+    public async Task PublishEffectQuenchAsync(int cellId, string action)
+    {
+        var payload = new
+        {
+            CellId = cellId,
+            Action = action,
+            Timestamp = DateTime.UtcNow.ToString("O")
+        };
+        var json = JsonConvert.SerializeObject(payload);
+        Enqueue($"effect/quench/{cellId}", json, MqttPriority.Critical);
+        Enqueue("screen/workshop", json, MqttPriority.Critical);
+        await Task.CompletedTask;
+    }
+
+    private void Enqueue(string topic, string payload, MqttPriority priority)
+    {
+        lock (_queueLock)
+        {
+            if (_messageQueue.Count >= MaxQueueSize)
+            {
+                while (_messageQueue.Count > MaxQueueSize * 3 / 4)
+                {
+                    _messageQueue.TryDequeue(out _, out _);
+                }
+                _logger.LogWarning("MQTT queue overflow, dropped low-priority messages");
+            }
+
+            var dedupKey = $"{topic}:{payload.GetHashCode()}";
+            var now = DateTime.UtcNow;
+            if (_topicLastSendTime.TryGetValue(dedupKey, out var lastSent))
+            {
+                var minInterval = priority switch
+                {
+                    MqttPriority.Critical => CriticalMinInterval,
+                    MqttPriority.High => HighMinInterval,
+                    _ => NormalMinInterval
+                };
+
+                if (now - lastSent < minInterval) return;
+            }
+
+            _topicLastSendTime[dedupKey] = now;
+            _messageQueue.Enqueue(new MqttMessage(topic, payload, priority, now), ((int)priority, now));
+        }
+
+        try { _queueSignal.Release(); } catch { }
+    }
+
+    private async Task ProcessQueueAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await _queueSignal.WaitAsync(ct);
+            }
+            catch (OperationCanceledException) { break; }
+
+            MqttMessage? msg = null;
+            lock (_queueLock)
+            {
+                if (_messageQueue.Count > 0)
+                    _messageQueue.TryDequeue(out msg, out _);
+            }
+
+            if (msg == null) continue;
+
+            var minInterval = msg.Priority switch
+            {
+                MqttPriority.Critical => CriticalMinInterval,
+                MqttPriority.High => HighMinInterval,
+                MqttPriority.Normal => NormalMinInterval,
+                MqttPriority.Low => LowMinInterval,
+                _ => NormalMinInterval
+            };
+
+            if (_topicLastSendTime.TryGetValue(msg.Topic, out var lastSent))
+            {
+                var elapsed = DateTime.UtcNow - lastSent;
+                if (elapsed < minInterval)
+                {
+                    await Task.Delay(minInterval - elapsed, ct);
+                }
+            }
+
+            await SendAsync(msg.Topic, msg.Payload);
+            _topicLastSendTime[msg.Topic] = DateTime.UtcNow;
+        }
+    }
+
+    private async Task SendAsync(string topic, string payload)
     {
         if (_mqttClient == null) return;
 
@@ -114,11 +246,14 @@ public class MqttService : IHostedService
             }
         }
 
-        var json = JsonConvert.SerializeObject(payload);
+        var qosLevel = topic.Contains("alarm") || topic.Contains("quench")
+            ? MqttQualityOfServiceLevel.AtLeastOnce
+            : MqttQualityOfServiceLevel.AtMostOnce;
+
         var message = new MqttApplicationMessageBuilder()
             .WithTopic($"aluminum/{topic}")
-            .WithPayload(Encoding.UTF8.GetBytes(json))
-            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+            .WithPayload(Encoding.UTF8.GetBytes(payload))
+            .WithQualityOfServiceLevel(qosLevel)
             .WithRetainFlag(false)
             .Build();
 

@@ -62,6 +62,7 @@ public class DataProcessingService
         }
 
         UpdateBuffers(dto);
+        UpdateFftFeatures(dto.CellId);
 
         var counter = Interlocked.Increment(ref _globalProcessCounter);
         var shouldEstimateConcentration = counter % 4 == 0;
@@ -88,6 +89,7 @@ public class DataProcessingService
             {
                 await _alarmService.TriggerAnodeEffectAlarmAsync(dto.CellId);
                 await _feedingService.ExecuteEffectQuenchAsync(dto.CellId);
+                await _mqttService.PublishEffectQuenchAsync(dto.CellId, "阳极效应自动熄灭程序已执行");
             }
         }
 
@@ -156,6 +158,20 @@ public class DataProcessingService
 
         var duration = recent.Count * 15.0 / 60.0;
         return (decimal)Math.Round(crossings / (2 * duration), 3);
+    }
+
+    private void UpdateFftFeatures(int cellId)
+    {
+        var voltages = _bufferService.GetVoltages(cellId);
+        if (voltages.Count < 32) return;
+
+        var voltageArray = voltages.TakeLast(64).ToArray();
+        var mean = voltageArray.Average();
+        var detrended = voltageArray.Select(v => v - mean).ToArray();
+        var spectrum = SvrConcentrationModel.ComputeFft(detrended);
+        var samplingRateHz = 1.0 / 15.0;
+        var features = SvrConcentrationModel.ExtractFftFeatures(spectrum, samplingRateHz);
+        _bufferService.UpdateFftFeatures(cellId, spectrum, features.DominantFreq, features.SpectralEnergy, features.HighFreqRatio);
     }
 
     private async Task BroadcastCellStatusAsync(int cellId)

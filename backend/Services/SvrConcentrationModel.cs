@@ -19,6 +19,9 @@ public class SvrConcentrationModel
         public float CurrentDistMean { get; set; }
         public float CurrentDistStd { get; set; }
         public float VoltageSlope { get; set; }
+        public float FftDominantFreq { get; set; }
+        public float FftSpectralEnergy { get; set; }
+        public float FftHighFreqRatio { get; set; }
     }
 
     private class ConcentrationOutput : ConcentrationInput
@@ -33,18 +36,25 @@ public class SvrConcentrationModel
         TrainInitialModel();
     }
 
+    private static string[] FeatureNames => new[]
+    {
+        nameof(ConcentrationInput.VoltageMean),
+        nameof(ConcentrationInput.VoltageStd),
+        nameof(ConcentrationInput.VoltageNoise),
+        nameof(ConcentrationInput.CurrentDistMean),
+        nameof(ConcentrationInput.CurrentDistStd),
+        nameof(ConcentrationInput.VoltageSlope),
+        nameof(ConcentrationInput.FftDominantFreq),
+        nameof(ConcentrationInput.FftSpectralEnergy),
+        nameof(ConcentrationInput.FftHighFreqRatio)
+    };
+
     private void TrainInitialModel()
     {
         var trainingData = GenerateSyntheticTrainingData();
         var dataView = _mlContext.Data.LoadFromEnumerable(trainingData);
 
-        var pipeline = _mlContext.Transforms.Concatenate("Features",
-                nameof(ConcentrationInput.VoltageMean),
-                nameof(ConcentrationInput.VoltageStd),
-                nameof(ConcentrationInput.VoltageNoise),
-                nameof(ConcentrationInput.CurrentDistMean),
-                nameof(ConcentrationInput.CurrentDistStd),
-                nameof(ConcentrationInput.VoltageSlope))
+        var pipeline = _mlContext.Transforms.Concatenate("Features", FeatureNames)
             .Append(_mlContext.Transforms.NormalizeMinMax("Features"))
             .Append(_mlContext.Regression.Trainers.Sdca(
                 labelColumnName: "Label",
@@ -64,6 +74,9 @@ public class SvrConcentrationModel
         public float CurrentDistMean { get; set; }
         public float CurrentDistStd { get; set; }
         public float VoltageSlope { get; set; }
+        public float FftDominantFreq { get; set; }
+        public float FftSpectralEnergy { get; set; }
+        public float FftHighFreqRatio { get; set; }
         public float Label { get; set; }
     }
 
@@ -83,6 +96,10 @@ public class SvrConcentrationModel
             var currentDistStd = (float)(5 + rng.NextDouble() * 10 + Math.Max(0, 2.0 - concentration) * 15);
             var voltageSlope = (float)((rng.NextDouble() - 0.5) * 0.001 + Math.Max(0, 2.0 - concentration) * -0.0005);
 
+            var fftDominantFreq = (float)(0.5 + rng.NextDouble() * 1.0 + Math.Max(0, 2.0 - concentration) * 2.5);
+            var fftSpectralEnergy = (float)(0.01 + rng.NextDouble() * 0.05 + Math.Max(0, 2.5 - concentration) * 0.08);
+            var fftHighFreqRatio = (float)(0.05 + rng.NextDouble() * 0.1 + Math.Max(0, 2.0 - concentration) * 0.3);
+
             samples.Add(new TrainingSample
             {
                 VoltageMean = voltageMean,
@@ -91,6 +108,9 @@ public class SvrConcentrationModel
                 CurrentDistMean = currentDistMean,
                 CurrentDistStd = currentDistStd,
                 VoltageSlope = voltageSlope,
+                FftDominantFreq = fftDominantFreq,
+                FftSpectralEnergy = fftSpectralEnergy,
+                FftHighFreqRatio = fftHighFreqRatio,
                 Label = concentration
             });
         }
@@ -99,7 +119,8 @@ public class SvrConcentrationModel
     }
 
     public double PredictConcentration(List<double> recentVoltages, List<double> recentCurrents,
-        double voltageNoise, double voltageSlope)
+        double voltageNoise, double voltageSlope,
+        double fftDominantFreq, double fftSpectralEnergy, double fftHighFreqRatio)
     {
         if (!_isModelLoaded || _trainedModel == null) return 3.0;
 
@@ -115,7 +136,10 @@ public class SvrConcentrationModel
             VoltageNoise = (float)voltageNoise,
             CurrentDistMean = currentDistMean,
             CurrentDistStd = currentDistStd,
-            VoltageSlope = (float)voltageSlope
+            VoltageSlope = (float)voltageSlope,
+            FftDominantFreq = (float)fftDominantFreq,
+            FftSpectralEnergy = (float)fftSpectralEnergy,
+            FftHighFreqRatio = (float)fftHighFreqRatio
         };
 
         lock (_lock)
@@ -146,18 +170,15 @@ public class SvrConcentrationModel
             CurrentDistMean = (float)d.features[3],
             CurrentDistStd = (float)d.features[4],
             VoltageSlope = (float)d.features[5],
+            FftDominantFreq = (float)d.features[6],
+            FftSpectralEnergy = (float)d.features[7],
+            FftHighFreqRatio = (float)d.features[8],
             Label = (float)d.label
         }).ToList();
 
         var dataView = _mlContext.Data.LoadFromEnumerable(samples);
 
-        var pipeline = _mlContext.Transforms.Concatenate("Features",
-                nameof(TrainingSample.VoltageMean),
-                nameof(TrainingSample.VoltageStd),
-                nameof(TrainingSample.VoltageNoise),
-                nameof(TrainingSample.CurrentDistMean),
-                nameof(TrainingSample.CurrentDistStd),
-                nameof(TrainingSample.VoltageSlope))
+        var pipeline = _mlContext.Transforms.Concatenate("Features", FeatureNames)
             .Append(_mlContext.Transforms.NormalizeMinMax("Features"))
             .Append(_mlContext.Regression.Trainers.Sdca(
                 labelColumnName: "Label",
@@ -168,5 +189,92 @@ public class SvrConcentrationModel
         {
             _trainedModel = pipeline.Fit(dataView);
         }
+    }
+
+    public static double[] ComputeFft(double[] signal)
+    {
+        var n = signal.Length;
+        if (n == 0) return Array.Empty<double>();
+
+        var m = (int)Math.Ceiling(Math.Log2(n));
+        var paddedLen = 1 << m;
+        var real = new double[paddedLen];
+        var imag = new double[paddedLen];
+        for (int i = 0; i < n; i++) real[i] = signal[i];
+
+        for (int i = 1, j = 0; i < paddedLen; i++)
+        {
+            var bit = paddedLen >> 1;
+            while ((j & bit) != 0) { j ^= bit; bit >>= 1; }
+            j ^= bit;
+            if (i < j)
+            {
+                (real[i], real[j]) = (real[j], real[i]);
+                (imag[i], imag[j]) = (imag[j], imag[i]);
+            }
+        }
+
+        for (int len = 2; len <= paddedLen; len <<= 1)
+        {
+            var halfLen = len >> 1;
+            var angle = -2.0 * Math.PI / len;
+            var wReal = Math.Cos(angle);
+            var wImag = Math.Sin(angle);
+
+            for (int i = 0; i < paddedLen; i += len)
+            {
+                var curReal = 1.0;
+                var curImag = 0.0;
+                for (int j = 0; j < halfLen; j++)
+                {
+                    var tReal = curReal * real[i + j + halfLen] - curImag * imag[i + j + halfLen];
+                    var tImag = curReal * imag[i + j + halfLen] + curImag * real[i + j + halfLen];
+                    real[i + j + halfLen] = real[i + j] - tReal;
+                    imag[i + j + halfLen] = imag[i + j] - tImag;
+                    real[i + j] += tReal;
+                    imag[i + j] += tImag;
+                    var newCurReal = curReal * wReal - curImag * wImag;
+                    curImag = curReal * wImag + curImag * wReal;
+                    curReal = newCurReal;
+                }
+            }
+        }
+
+        var halfSpectrum = paddedLen / 2;
+        var magnitudes = new double[halfSpectrum];
+        for (int i = 0; i < halfSpectrum; i++)
+        {
+            magnitudes[i] = Math.Sqrt(real[i] * real[i] + imag[i] * imag[i]) / paddedLen;
+        }
+
+        return magnitudes;
+    }
+
+    public static (double DominantFreq, double SpectralEnergy, double HighFreqRatio) ExtractFftFeatures(
+        double[] magnitudes, double samplingRateHz)
+    {
+        if (magnitudes.Length < 2) return (0, 0, 0);
+
+        var maxIdx = 0;
+        var maxMag = 0.0;
+        var totalEnergy = 0.0;
+        var highFreqEnergy = 0.0;
+        var midPoint = magnitudes.Length / 2;
+
+        for (int i = 1; i < magnitudes.Length; i++)
+        {
+            if (magnitudes[i] > maxMag)
+            {
+                maxMag = magnitudes[i];
+                maxIdx = i;
+            }
+            totalEnergy += magnitudes[i] * magnitudes[i];
+            if (i >= midPoint / 2) highFreqEnergy += magnitudes[i] * magnitudes[i];
+        }
+
+        var dominantFreq = (double)maxIdx / magnitudes.Length * samplingRateHz / 2.0;
+        var highFreqRatio = totalEnergy > 0 ? highFreqEnergy / totalEnergy : 0;
+
+        return (dominantFreq, totalEnergy, highFreqRatio);
     }
 }
