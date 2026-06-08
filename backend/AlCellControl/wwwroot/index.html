@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>电解铝氧化铝浓度在线检测与槽控优化系统</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Microsoft YaHei','SimHei',sans-serif;background:#1a1a2e;color:#e0e0e0;}
+#app{display:flex;flex-direction:column;height:100vh;}
+#header{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:52px;background:linear-gradient(90deg,#0f3460,#16213e);border-bottom:2px solid #0f3460;flex-shrink:0;}
+#header h1{font-size:20px;font-weight:700;letter-spacing:2px;color:#e0e0e0;}
+#headerRight{display:flex;align-items:center;gap:16px;}
+#clock{font-size:14px;color:#a0a0c0;font-variant-numeric:tabular-nums;}
+#connStatus{display:flex;align-items:center;gap:6px;font-size:13px;}
+#connDot{width:10px;height:10px;border-radius:50%;background:#4caf50;transition:background .3s;}
+#connDot.offline{background:#f44336;}
+#main{display:flex;flex:1;overflow:hidden;}
+#leftPanel{width:70%;display:flex;flex-direction:column;padding:12px;overflow:hidden;}
+#leftPanel .panel-title{font-size:14px;color:#a0a0c0;margin-bottom:8px;flex-shrink:0;}
+#canvasWrap{flex:1;position:relative;background:#16213e;border-radius:8px;overflow:hidden;border:1px solid #0f3460;}
+#cellCanvas{display:block;width:100%;height:100%;}
+#tooltip{position:absolute;display:none;background:rgba(15,52,96,0.95);border:1px solid #0f3460;border-radius:6px;padding:10px 14px;font-size:13px;line-height:1.7;pointer-events:none;z-index:10;box-shadow:0 4px 16px rgba(0,0,0,0.4);}
+#tooltip .tt-label{color:#a0a0c0;}
+#tooltip .tt-val{color:#fff;font-weight:600;}
+#rightPanel{width:30%;display:flex;flex-direction:column;padding:12px 12px 12px 0;overflow:hidden;gap:12px;}
+.panel-box{background:#16213e;border-radius:8px;border:1px solid #0f3460;display:flex;flex-direction:column;overflow:hidden;}
+.panel-box .panel-header{padding:10px 16px;font-size:15px;font-weight:700;color:#e0e0e0;border-bottom:1px solid #0f3460;flex-shrink:0;display:flex;align-items:center;gap:8px;}
+.alarm-section{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+#alarmList{flex:1;overflow-y:auto;padding:8px;}
+#alarmList::-webkit-scrollbar{width:6px;}
+#alarmList::-webkit-scrollbar-thumb{background:#0f3460;border-radius:3px;}
+.alarm-item{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;margin-bottom:6px;border-radius:6px;background:rgba(15,52,96,0.4);border:1px solid rgba(15,52,96,0.6);font-size:13px;line-height:1.5;}
+.alarm-item.level2{animation:pulseAlarm 1s ease-in-out infinite;border-color:rgba(244,67,54,0.5);}
+@keyframes pulseAlarm{0%,100%{background:rgba(244,67,54,0.08);}50%{background:rgba(244,67,54,0.22);}}
+.alarm-icon{font-size:16px;flex-shrink:0;margin-top:1px;}
+.alarm-body{flex:1;min-width:0;}
+.alarm-meta{display:flex;gap:8px;color:#a0a0c0;font-size:12px;margin-top:2px;}
+.alarm-msg{color:#e0e0e0;margin-top:2px;}
+.alarm-cell{color:#ff9800;font-weight:600;}
+.alarm-type{color:#64b5f6;}
+.alarm-time{color:#a0a0c0;}
+.alarm-ack-btn{flex-shrink:0;padding:4px 10px;font-size:12px;background:#0f3460;color:#e0e0e0;border:1px solid #1a5276;border-radius:4px;cursor:pointer;transition:background .2s;}
+.alarm-ack-btn:hover{background:#1a5276;}
+#statsSection{padding:12px 16px;border-top:1px solid #0f3460;flex-shrink:0;}
+#statsSection h3{font-size:13px;color:#a0a0c0;margin-bottom:8px;}
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:13px;}
+.stats-grid .stat-label{color:#a0a0c0;}
+.stats-grid .stat-val{color:#e0e0e0;font-weight:600;text-align:right;}
+
+#modalOverlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:100;display:none;align-items:center;justify-content:center;}
+#modalOverlay.open{display:flex;}
+#modalPanel{background:#16213e;border:1px solid #0f3460;border-radius:10px;width:720px;max-width:90vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.5);}
+#modalPanel::-webkit-scrollbar{width:6px;}
+#modalPanel::-webkit-scrollbar-thumb{background:#0f3460;border-radius:3px;}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #0f3460;position:sticky;top:0;background:#16213e;z-index:1;}
+.modal-header h2{font-size:17px;color:#e0e0e0;}
+.modal-close{width:32px;height:32px;border-radius:50%;background:#0f3460;border:1px solid #1a5276;color:#e0e0e0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .2s;}
+.modal-close:hover{background:#f44336;}
+.modal-info-row{display:flex;gap:16px;padding:12px 20px;font-size:13px;border-bottom:1px solid rgba(15,52,96,0.5);}
+.modal-info-row .info-label{color:#a0a0c0;min-width:70px;}
+.modal-info-row .info-val{color:#e0e0e0;font-weight:600;}
+.modal-chart-section{padding:16px 20px 8px;}
+.modal-chart-section h3{font-size:14px;color:#a0a0c0;margin-bottom:8px;}
+.chart-wrap{position:relative;width:100%;height:180px;background:rgba(15,52,96,0.3);border-radius:6px;padding:8px;}
+.modal-table-section{padding:8px 20px 20px;}
+.modal-table-section h3{font-size:14px;color:#a0a0c0;margin-bottom:8px;}
+.feed-table{width:100%;border-collapse:collapse;font-size:13px;}
+.feed-table th{text-align:left;padding:6px 10px;background:rgba(15,52,96,0.5);color:#a0a0c0;border-bottom:1px solid #0f3460;}
+.feed-table td{padding:6px 10px;border-bottom:1px solid rgba(15,52,96,0.3);color:#e0e0e0;}
+
+#legend{display:flex;gap:16px;padding:6px 0;flex-shrink:0;font-size:12px;align-items:center;}
+#legend .leg-item{display:flex;align-items:center;gap:4px;}
+#legend .leg-color{width:14px;height:14px;border-radius:3px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>电解铝氧化铝浓度在线检测与槽控优化系统</h1>
+    <div id="headerRight">
+      <div id="connStatus"><div id="connDot"></div><span id="connText">已连接</span></div>
+      <div id="clock"></div>
+    </div>
+  </div>
+  <div id="main">
+    <div id="leftPanel">
+      <div class="panel-title">电解槽车间布局</div>
+      <div id="legend">
+        <div class="leg-item"><div class="leg-color" style="background:#4caf50;"></div>浓度≥2.0%（正常）</div>
+        <div class="leg-item"><div class="leg-color" style="background:#ff9800;"></div>浓度1.5%-2.0%（偏低）</div>
+        <div class="leg-item"><div class="leg-color" style="background:#f44336;"></div>浓度&lt;1.5%（极低）</div>
+        <div class="leg-item"><div class="leg-color" style="background:#f44336;animation:flashCell 0.5s ease-in-out infinite alternate;"></div>阳极效应风险&gt;80%</div>
+      </div>
+      <div id="canvasWrap">
+        <canvas id="cellCanvas"></canvas>
+        <div id="tooltip"></div>
+      </div>
+    </div>
+    <div id="rightPanel">
+      <div class="panel-box alarm-section">
+        <div class="panel-header">⚠️ 实时告警</div>
+        <div id="alarmList"></div>
+        <div id="statsSection">
+          <h3>告警统计</h3>
+          <div class="stats-grid" id="statsGrid"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="modalOverlay">
+  <div id="modalPanel">
+    <div class="modal-header">
+      <h2 id="modalTitle">电解槽详情</h2>
+      <button class="modal-close" id="modalCloseBtn">✕</button>
+    </div>
+    <div class="modal-info-row" id="modalInfoRow"></div>
+    <div class="modal-chart-section">
+      <h3>电压趋势（近8小时）</h3>
+      <div class="chart-wrap"><canvas id="voltageChart"></canvas></div>
+    </div>
+    <div class="modal-chart-section">
+      <h3>电流分布趋势（近8小时）</h3>
+      <div class="chart-wrap"><canvas id="currentChart"></canvas></div>
+    </div>
+    <div class="modal-table-section">
+      <h3>最近加料记录</h3>
+      <table class="feed-table">
+        <thead><tr><th>时间</th><th>类型</th><th>加料量 (kg)</th></tr></thead>
+        <tbody id="feedTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var ROWS = 10, COLS = 20;
+  var cells = [];
+  var hoveredCell = null;
+  var flashPhase = 0;
+  var flashTimer = 0;
+  var voltageChart = null;
+  var currentChart = null;
+  var connected = true;
+
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      cells.push({
+        id: r * COLS + c + 1,
+        row: r,
+        col: c,
+        voltage: 4.0 + Math.random() * 0.5,
+        concentration: 1.8 + Math.random() * 1.0,
+        effectProb: Math.random() * 30,
+        status: '运行中',
+        name: (r < 5 ? 'A' : 'B') + '区-' + (r * COLS + c + 1) + '号槽'
+      });
+    }
+  }
+
+  var canvas = document.getElementById('cellCanvas');
+  var ctx = canvas.getContext('2d');
+  var tooltip = document.getElementById('tooltip');
+
+  function resizeCanvas() {
+    var wrap = document.getElementById('canvasWrap');
+    canvas.width = wrap.clientWidth * window.devicePixelRatio;
+    canvas.height = wrap.clientHeight * window.devicePixelRatio;
+    canvas.style.width = wrap.clientWidth + 'px';
+    canvas.style.height = wrap.clientHeight + 'px';
+    ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+    drawCanvas();
+  }
+
+  function getCellColor(cell) {
+    if (cell.effectProb > 80 && flashPhase) return 'rgba(244,67,54,0.2)';
+    if (cell.concentration < 1.5) return '#f44336';
+    if (cell.concentration < 2.0) return '#ff9800';
+    return '#4caf50';
+  }
+
+  function getCellRect(row, col, cw, ch, margin, gapX, gapY) {
+    var x = margin + col * (cw + gapX);
+    var y = margin + row * (ch + gapY);
+    return {x: x, y: y, w: cw, h: ch};
+  }
+
+  function drawRoundedRect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function drawCanvas() {
+    var W = canvas.width / window.devicePixelRatio;
+    var H = canvas.height / window.devicePixelRatio;
+    ctx.clearRect(0, 0, W, H);
+
+    var leftMargin = 36;
+    var topMargin = 28;
+    var bottomMargin = 24;
+    var rightMargin = 12;
+    var zoneGap = 20;
+
+    var availW = W - leftMargin - rightMargin;
+    var availH = H - topMargin - bottomMargin - zoneGap;
+
+    var gapX = 3, gapY = 3;
+    var cw = (availW - (COLS - 1) * gapX) / COLS;
+    var ch = (availH - (ROWS - 1) * gapY) / ROWS;
+
+    cw = Math.max(cw, 8);
+    ch = Math.max(ch, 8);
+
+    var totalGridW = COLS * cw + (COLS - 1) * gapX;
+    var totalGridH = ROWS * ch + (ROWS - 1) * gapY + zoneGap;
+    var offsetX = leftMargin + (availW - totalGridW) / 2;
+    var offsetY = topMargin + (availH - totalGridH) / 2;
+
+    ctx.font = '11px Microsoft YaHei, SimHei, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (var c = 0; c < COLS; c++) {
+      ctx.fillStyle = '#a0a0c0';
+      ctx.fillText(c + 1, offsetX + c * (cw + gapX) + cw / 2, offsetY - 12);
+    }
+    ctx.textAlign = 'right';
+    for (var r = 0; r < ROWS; r++) {
+      var ry = offsetY + r * (ch + gapY);
+      if (r >= 5) ry += zoneGap;
+      ctx.fillStyle = '#a0a0c0';
+      ctx.fillText(r + 1, offsetX - 8, ry + ch / 2);
+    }
+
+    var zoneCenterY1 = offsetY + 4 * (ch + gapY) + ch + zoneGap / 2;
+    ctx.save();
+    ctx.font = 'bold 13px Microsoft YaHei, SimHei, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#64b5f6';
+    ctx.fillText('A区', offsetX - 20, offsetY + 2 * (ch + gapY) + ch);
+    ctx.fillStyle = '#ce93d8';
+    ctx.fillText('B区', offsetX - 20, offsetY + 7 * (ch + gapY) + zoneGap + ch);
+
+    ctx.strokeStyle = 'rgba(100,181,246,0.3)';
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(offsetX, zoneCenterY1);
+    ctx.lineTo(offsetX + totalGridW, zoneCenterY1);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      var r = cell.row, c = cell.col;
+      var ry = offsetY + r * (ch + gapY);
+      if (r >= 5) ry += zoneGap;
+      var cx = offsetX + c * (cw + gapX);
+
+      var color = getCellColor(cell);
+      drawRoundedRect(ctx, cx, ry, cw, ch, 3);
+      ctx.fillStyle = color;
+      ctx.fill();
+
+      if (hoveredCell && hoveredCell.id === cell.id) {
+        drawRoundedRect(ctx, cx, ry, cw, ch, 3);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = '#fff';
+      ctx.font = cw > 30 ? '10px Microsoft YaHei, SimHei, sans-serif' : '8px Microsoft YaHei, SimHei, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(cell.id, cx + cw / 2, ry + ch / 2);
+    }
+  }
+
+  function hitTest(mx, my) {
+    var W = canvas.width / window.devicePixelRatio;
+    var H = canvas.height / window.devicePixelRatio;
+
+    var leftMargin = 36, topMargin = 28, bottomMargin = 24, rightMargin = 12, zoneGap = 20;
+    var availW = W - leftMargin - rightMargin;
+    var availH = H - topMargin - bottomMargin - zoneGap;
+    var gapX = 3, gapY = 3;
+    var cw = (availW - (COLS - 1) * gapX) / COLS;
+    var ch = (availH - (ROWS - 1) * gapY) / ROWS;
+    cw = Math.max(cw, 8); ch = Math.max(ch, 8);
+    var totalGridW = COLS * cw + (COLS - 1) * gapX;
+    var totalGridH = ROWS * ch + (ROWS - 1) * gapY + zoneGap;
+    var offsetX = leftMargin + (availW - totalGridW) / 2;
+    var offsetY = topMargin + (availH - totalGridH) / 2;
+
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      var ry = offsetY + cell.row * (ch + gapY);
+      if (cell.row >= 5) ry += zoneGap;
+      var cx = offsetX + cell.col * (cw + gapX);
+      if (mx >= cx && mx <= cx + cw && my >= ry && my <= ry + ch) return cell;
+    }
+    return null;
+  }
+
+  canvas.addEventListener('mousemove', function(e) {
+    var rect = canvas.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
+    var cell = hitTest(mx, my);
+    hoveredCell = cell;
+    if (cell) {
+      canvas.style.cursor = 'pointer';
+      tooltip.style.display = 'block';
+      tooltip.innerHTML =
+        '<div><span class="tt-label">槽号: </span><span class="tt-val">' + cell.id + '</span></div>' +
+        '<div><span class="tt-label">电压: </span><span class="tt-val">' + cell.voltage.toFixed(2) + ' V</span></div>' +
+        '<div><span class="tt-label">浓度: </span><span class="tt-val">' + cell.concentration.toFixed(2) + '%</span></div>' +
+        '<div><span class="tt-label">效应概率: </span><span class="tt-val">' + cell.effectProb.toFixed(1) + '%</span></div>';
+      var tx = e.clientX - rect.left + 16;
+      var ty = e.clientY - rect.top - 10;
+      if (tx + 180 > rect.width) tx = e.clientX - rect.left - 180;
+      if (ty + 100 > rect.height) ty = e.clientY - rect.top - 100;
+      tooltip.style.left = tx + 'px';
+      tooltip.style.top = ty + 'px';
+    } else {
+      canvas.style.cursor = 'default';
+      tooltip.style.display = 'none';
+    }
+  });
+
+  canvas.addEventListener('mouseleave', function() {
+    hoveredCell = null;
+    tooltip.style.display = 'none';
+  });
+
+  canvas.addEventListener('click', function(e) {
+    var rect = canvas.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
+    var cell = hitTest(mx, my);
+    if (cell) openModal(cell);
+  });
+
+  var lastFrameTime = 0;
+  function animate(timestamp) {
+    if (timestamp - flashTimer >= 500) {
+      flashPhase = !flashPhase;
+      flashTimer = timestamp;
+    }
+    drawCanvas();
+    requestAnimationFrame(animate);
+  }
+
+  function openModal(cell) {
+    var overlay = document.getElementById('modalOverlay');
+    overlay.classList.add('open');
+
+    var zone = cell.row < 5 ? 'A区' : 'B区';
+    document.getElementById('modalTitle').textContent = cell.name + ' 详情';
+    document.getElementById('modalInfoRow').innerHTML =
+      '<div><span class="info-label">槽号:</span><span class="info-val">' + cell.id + '</span></div>' +
+      '<div><span class="info-label">名称:</span><span class="info-val">' + cell.name + '</span></div>' +
+      '<div><span class="info-label">区域:</span><span class="info-val">' + zone + '</span></div>' +
+      '<div><span class="info-label">状态:</span><span class="info-val">' + cell.status + '</span></div>';
+
+    fetchTrendData(cell.id);
+    document.getElementById('feedTableBody').innerHTML = '<tr><td colspan="3" style="text-align:center;color:#a0a0c0;">加载中...</td></tr>';
+  }
+
+  function closeModal() {
+    document.getElementById('modalOverlay').classList.remove('open');
+    if (voltageChart) { voltageChart.destroy(); voltageChart = null; }
+    if (currentChart) { currentChart.destroy(); currentChart = null; }
+  }
+
+  document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
+  document.getElementById('modalOverlay').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+
+  function fetchTrendData(cellId) {
+    fetch('/api/celldata/' + cellId + '/trend')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var voltageCurrentData = data.voltageCurrentData || [];
+        var voltageTrend = voltageCurrentData.map(function(p) {
+          return { time: p.receivedAt, value: p.voltage };
+        });
+        var currentTrend = voltageCurrentData.map(function(p) {
+          return { time: p.receivedAt, value: p.current };
+        });
+        var feedRecords = (data.feedingRecords || []).map(function(f) {
+          return { time: f.fedAt, type: f.feedType, amount: f.feedAmountKg };
+        });
+        renderVoltageChart(voltageTrend);
+        renderCurrentChart(currentTrend);
+        renderFeedTable(feedRecords);
+      })
+      .catch(function() {
+        renderVoltageChart(generateMockTrend(8, 3.8, 4.5, 'V'));
+        renderCurrentChart(generateMockTrend(8, 300, 360, 'kA'));
+        renderFeedTable(generateMockFeeds());
+      });
+  }
+
+  function generateMockTrend(hours, min, max, unit) {
+    var points = [];
+    var now = Date.now();
+    for (var i = hours * 6; i >= 0; i--) {
+      points.push({
+        time: new Date(now - i * 10 * 60000).toISOString(),
+        value: min + Math.random() * (max - min)
+      });
+    }
+    return points;
+  }
+
+  function generateMockFeeds() {
+    var types = ['氧化铝', '氟化盐', '氧化铝'];
+    var feeds = [];
+    var now = Date.now();
+    for (var i = 0; i < 10; i++) {
+      feeds.push({
+        time: new Date(now - i * 3600000 * Math.random() * 3).toISOString(),
+        type: types[i % 3],
+        amount: (15 + Math.random() * 25).toFixed(1)
+      });
+    }
+    return feeds;
+  }
+
+  var chartDefaults = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 300 },
+    scales: {
+      x: {
+        ticks: { color: '#a0a0c0', maxTicksLimit: 8, font: { size: 10 } },
+        grid: { color: 'rgba(15,52,96,0.5)' }
+      },
+      y: {
+        ticks: { color: '#a0a0c0', font: { size: 10 } },
+        grid: { color: 'rgba(15,52,96,0.5)' }
+      }
+    },
+    plugins: {
+      legend: { display: false }
+    }
+  };
+
+  function renderVoltageChart(trend) {
+    if (voltageChart) { voltageChart.destroy(); voltageChart = null; }
+    var labels = trend.map(function(p) {
+      var d = new Date(p.time);
+      return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+    });
+    var values = trend.map(function(p) { return p.value; });
+    voltageChart = new Chart(document.getElementById('voltageChart'), {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: values,
+          borderColor: '#4caf50',
+          backgroundColor: 'rgba(76,175,80,0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+          pointRadius: 0,
+          pointHoverRadius: 4
+        }]
+      },
+      options: JSON.parse(JSON.stringify(chartDefaults))
+    });
+  }
+
+  function renderCurrentChart(trend) {
+    if (currentChart) { currentChart.destroy(); currentChart = null; }
+    var labels = trend.map(function(p) {
+      var d = new Date(p.time);
+      return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+    });
+    var values = trend.map(function(p) { return p.value; });
+    currentChart = new Chart(document.getElementById('currentChart'), {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: values,
+          borderColor: '#64b5f6',
+          backgroundColor: 'rgba(100,181,246,0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+          pointRadius: 0,
+          pointHoverRadius: 4
+        }]
+      },
+      options: JSON.parse(JSON.stringify(chartDefaults))
+    });
+  }
+
+  function renderFeedTable(records) {
+    var tbody = document.getElementById('feedTableBody');
+    if (!records.length) {
+      tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#a0a0c0;">暂无记录</td></tr>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      var d = new Date(r.time);
+      var ts = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
+      html += '<tr><td>' + ts + '</td><td>' + r.type + '</td><td>' + r.amount + '</td></tr>';
+    }
+    tbody.innerHTML = html;
+  }
+
+  function fetchOverview() {
+    fetch('/api/celldata/overview')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        setConnected(true);
+        if (data && Array.isArray(data)) {
+          for (var i = 0; i < data.length; i++) {
+            var d = data[i];
+            var idx = d.cellId - 1;
+            if (idx >= 0 && idx < cells.length) {
+              cells[idx].voltage = d.voltage !== undefined ? d.voltage : cells[idx].voltage;
+              cells[idx].concentration = d.aluminaConcentration !== undefined ? d.aluminaConcentration : cells[idx].concentration;
+              cells[idx].effectProb = d.anodeEffectProbability !== undefined ? d.anodeEffectProbability * 100 : cells[idx].effectProb;
+              cells[idx].name = d.cellName || cells[idx].name;
+              if (d.latestAlarmType) {
+                cells[idx].status = d.latestAlarmLevel === 2 ? '阳极效应预警' : '浓度告警';
+              } else {
+                cells[idx].status = '运行中';
+              }
+            }
+          }
+        }
+      })
+      .catch(function() { setConnected(false); });
+  }
+
+  function fetchAlarms() {
+    fetch('/api/alarm/active')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        setConnected(true);
+        renderAlarms(data || []);
+      })
+      .catch(function() { setConnected(false); });
+  }
+
+  function fetchAlarmStats() {
+    fetch('/api/alarm/stats')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        renderStats(data || {});
+      })
+      .catch(function() {});
+  }
+
+  function renderAlarms(alarms) {
+    var list = document.getElementById('alarmList');
+    if (!alarms.length) {
+      list.innerHTML = '<div style="text-align:center;padding:24px;color:#a0a0c0;">暂无活跃告警</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < alarms.length; i++) {
+      var a = alarms[i];
+      var icon = a.alarmLevel === 2 ? '🔴' : '⚠️';
+      var cls = a.alarmLevel === 2 ? ' level2' : '';
+      var timeStr = '';
+      if (a.triggeredAt) {
+        var d = new Date(a.triggeredAt);
+        timeStr = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
+      }
+      var alarmTypeLabel = a.alarmType === 'AnodeEffect' ? '阳极效应' : '浓度偏低';
+      html += '<div class="alarm-item' + cls + '">' +
+        '<div class="alarm-icon">' + icon + '</div>' +
+        '<div class="alarm-body">' +
+          '<div><span class="alarm-cell">#' + (a.cellId || '-') + '</span> <span class="alarm-type">' + alarmTypeLabel + '</span></div>' +
+          '<div class="alarm-meta"><span class="alarm-time">' + timeStr + '</span></div>' +
+          '<div class="alarm-msg">' + (a.alarmMessage || '') + '</div>' +
+        '</div>' +
+        '<button class="alarm-ack-btn" data-id="' + a.id + '">确认告警</button>' +
+      '</div>';
+    }
+    list.innerHTML = html;
+
+    var btns = list.querySelectorAll('.alarm-ack-btn');
+    btns.forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var alarmId = this.getAttribute('data-id');
+        acknowledgeAlarm(alarmId, this);
+      });
+    });
+  }
+
+  function acknowledgeAlarm(id, btn) {
+    btn.disabled = true;
+    btn.textContent = '确认中...';
+    fetch('/api/alarm/' + id + '/acknowledge', { method: 'POST' })
+      .then(function(r) {
+        if (r.ok) {
+          var item = btn.closest('.alarm-item');
+          if (item) item.remove();
+          fetchAlarmStats();
+        } else {
+          btn.disabled = false;
+          btn.textContent = '确认告警';
+        }
+      })
+      .catch(function() {
+        btn.disabled = false;
+        btn.textContent = '确认告警';
+      });
+  }
+
+  function renderStats(stats) {
+    var grid = document.getElementById('statsGrid');
+    var activeTotal = stats.totalActive !== undefined ? stats.totalActive : '-';
+    var level1 = '-';
+    var level2 = '-';
+    if (stats.byLevel && typeof stats.byLevel === 'object') {
+      level1 = stats.byLevel['1'] !== undefined ? stats.byLevel['1'] : '-';
+      level2 = stats.byLevel['2'] !== undefined ? stats.byLevel['2'] : '-';
+    }
+    var typesHtml = '';
+    if (stats.byType && typeof stats.byType === 'object') {
+      var keys = Object.keys(stats.byType);
+      for (var i = 0; i < keys.length; i++) {
+        var typeLabel = keys[i] === 'AnodeEffect' ? '阳极效应' : keys[i] === 'ConcentrationLow' ? '浓度偏低' : keys[i];
+        typesHtml += '<span class="stat-label">' + typeLabel + ':</span><span class="stat-val">' + stats.byType[keys[i]] + '</span>';
+      }
+    }
+    grid.innerHTML =
+      '<span class="stat-label">活跃告警:</span><span class="stat-val">' + activeTotal + '</span>' +
+      '<span class="stat-label">一级告警:</span><span class="stat-val">' + level1 + '</span>' +
+      '<span class="stat-label">二级告警:</span><span class="stat-val">' + level2 + '</span>' +
+      typesHtml;
+  }
+
+  function setConnected(ok) {
+    connected = ok;
+    var dot = document.getElementById('connDot');
+    var text = document.getElementById('connText');
+    if (ok) {
+      dot.classList.remove('offline');
+      text.textContent = '已连接';
+    } else {
+      dot.classList.add('offline');
+      text.textContent = '已断开';
+    }
+  }
+
+  function updateClock() {
+    var now = new Date();
+    var y = now.getFullYear();
+    var mo = (now.getMonth() + 1).toString().padStart(2, '0');
+    var d = now.getDate().toString().padStart(2, '0');
+    var h = now.getHours().toString().padStart(2, '0');
+    var mi = now.getMinutes().toString().padStart(2, '0');
+    var s = now.getSeconds().toString().padStart(2, '0');
+    document.getElementById('clock').textContent = y + '-' + mo + '-' + d + ' ' + h + ':' + mi + ':' + s;
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  resizeCanvas();
+  requestAnimationFrame(animate);
+
+  fetchOverview();
+  fetchAlarms();
+  fetchAlarmStats();
+
+  setInterval(fetchOverview, 5000);
+  setInterval(fetchAlarms, 5000);
+  setInterval(fetchAlarmStats, 5000);
+})();
+</script>
+</body>
+</html>
