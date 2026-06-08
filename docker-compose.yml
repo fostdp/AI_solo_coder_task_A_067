@@ -1,0 +1,85 @@
+version: "3.9"
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: alcell-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "AlCell2024!Strong"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql/data
+      - sqlserver_backup:/var/opt/mssql/backup
+      - ./database:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "AlCell2024!Strong" -C -Q "SELECT 1" || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - alcell-net
+    restart: unless-stopped
+
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0.18
+    container_name: alcell-mqtt
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mqtt-broker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt_data:/mosquitto/data
+    networks:
+      - alcell-net
+    restart: unless-stopped
+
+  alcell-api:
+    build:
+      context: ./backend/AlCellControl
+      dockerfile: Dockerfile
+    container_name: alcell-api
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=AlCellMonitor;User Id=sa;Password=AlCell2024!Strong;TrustServerCertificate=True;
+      - Mqtt__Host=mqtt-broker
+      - Mqtt__Port=1883
+      - ApplicationInsights__ConnectionString=${APPINSIGHTS_CONNECTION_STRING:-}
+    ports:
+      - "5000:5000"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_started
+    volumes:
+      - api_logs:/app/logs
+    networks:
+      - alcell-net
+    restart: unless-stopped
+
+  simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: alcell-simulator
+    environment:
+      - SIM_API_URL=http://alcell-api:5000
+    command: ["--url", "http://alcell-api:5000", "--cells", "200", "--interval", "15", "--injection", "/app/injection_example.json"]
+    depends_on:
+      - alcell-api
+    networks:
+      - alcell-net
+    restart: unless-stopped
+
+volumes:
+  sqlserver_data:
+  sqlserver_backup:
+  mqtt_data:
+  api_logs:
+
+networks:
+  alcell-net:
+    driver: bridge

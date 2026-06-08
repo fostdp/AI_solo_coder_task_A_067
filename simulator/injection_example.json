@@ -1,0 +1,30 @@
+{
+  "concentration_drops": [
+    {
+      "description": "5台槽在第20轮注入浓度快速下降",
+      "cell_ids": [15, 42, 78, 123, 189],
+      "magnitude": 0.8,
+      "at_cycle": 20
+    },
+    {
+      "description": "随机10台槽在第50轮注入中等浓度下降",
+      "random_count": 10,
+      "magnitude": 0.5,
+      "at_cycle": 50
+    }
+  ],
+  "anode_effect_precursors": [
+    {
+      "description": "3台槽在第30轮注入阳极效应前兆(电压毛刺)",
+      "cell_ids": [7, 88, 155],
+      "duration_cycles": 12,
+      "at_cycle": 30
+    },
+    {
+      "description": "随机5台槽在第60轮注入阳极效应前兆",
+      "random_count": 5,
+      "duration_cycles": 8,
+      "at_cycle": 60
+    }
+  ]
+}

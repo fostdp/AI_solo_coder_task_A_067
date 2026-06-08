@@ -10,6 +10,10 @@
     <PackageReference Include="MQTTnet" Version="4.3.3.952" />
     <PackageReference Include="MediatR" Version="12.2.0" />
     <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.1" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
+    <PackageReference Include="ApplicationInsights.TelemetryAdapter" Version="2.22.0" />
   </ItemGroup>
   <ItemGroup>
     <None Update="Configuration\**">

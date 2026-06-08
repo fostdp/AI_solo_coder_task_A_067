@@ -1,0 +1,14 @@
+ALTER INDEX IX_CellRealtimeData_CellId_ReceivedAt ON CellRealtimeData REORGANIZE;
+ALTER INDEX IX_AluminaConcentrationHistory ON AluminaConcentrationHistory REORGANIZE;
+ALTER INDEX IX_AnodeEffectPrediction ON AnodeEffectPrediction REORGANIZE;
+ALTER INDEX IX_AlarmRecord ON AlarmRecord REORGANIZE;
+ALTER INDEX IX_FeedingRecord ON FeedingRecord REORGANIZE;
+ALTER INDEX IX_CellControlCommand ON CellControlCommand REORGANIZE;
+
+UPDATE STATISTICS CellRealtimeData WITH FULLSCAN;
+UPDATE STATISTICS AluminaConcentrationHistory WITH FULLSCAN;
+UPDATE STATISTICS AnodeEffectPrediction WITH FULLSCAN;
+UPDATE STATISTICS AlarmRecord WITH FULLSCAN;
+UPDATE STATISTICS FeedingRecord WITH FULLSCAN;
+UPDATE STATISTICS CellControlCommand WITH FULLSCAN;
+UPDATE STATISTICS CellInfo WITH FULLSCAN;
